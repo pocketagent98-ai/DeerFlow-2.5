@@ -36,7 +36,7 @@ AUTO_PROVIDERS_ENV = "DEERFLOW_AUTO_PROVIDERS"
 NVIDIA_DEPTH = 4           # how many top-ranked NVIDIA models to inject
 DEFAULT_RPM = 40           # provider rate-limit pacing for injected models
 
-_slug_re = re.compile(r"[^a-z0-9]+")
+_slug_re = re.compile(r"[^a-z0-9-]+")
 
 
 def _import_providers():

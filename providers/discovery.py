@@ -99,12 +99,15 @@ class ModelCatalog:
 
     def _zai_entries(self, api_key: str) -> List[CatalogEntry]:
         listed = fetch_zai_models(api_key, self.client_factory)
-        # Keep only the known-free models; intersection with the live list when
-        # the endpoint responds, otherwise the static free set.
+        # SAFETY RULE: only the three documented free models are ever used.
+        # - Endpoint unavailable        -> trust the documented free set.
+        # - Endpoint up, free models   -> use exactly those.
+        # - Endpoint up, none free      -> use NOTHING. Never fall back to
+        #   arbitrary (possibly paid) models just because they are listed.
         if listed:
-            keep = [m for m in ZAI_FREE_MODELS if m in listed] or listed[:3]
+            keep = [m for m in ZAI_FREE_MODELS if m in listed]
         else:
-            keep = ZAI_FREE_MODELS
+            keep = list(ZAI_FREE_MODELS)
         return [
             CatalogEntry(provider="zai", model=mid, api_base=ZAI_BASE_URL,
                           api_key_env="ZAI_API_KEY")

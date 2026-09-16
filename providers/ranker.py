@@ -1,27 +1,37 @@
 """Power ranking: always put the most capable model first, auto-upgrade later.
 
 "Power" cannot be read from an API field, so this ranker makes its scoring
-transparent and editable instead of hiding it:
+transparent and editable instead of hiding it.
 
-score = TIER + 0.005 * PARAMETERS + 10 * VERSION
+Ranking is TIER-FIRST (lexicographic on a tuple), which guarantees the
+documented safety property:
 
-- TIER is a keyword score from the model name:
-    lightning / ultra / frontier -> 100   (top tier)
-    pro                          -> 80
-    super                        -> 70
-    (unrecognized keyword)       -> 50   (flagged for review, never auto-promoted
-                                           above a known top-tier model)
-    air                          -> 35
-    nano / mini                  -> 25
-- PARAMETERS is the total parameter count parsed from the name (550b, 30b...).
-- VERSION is the leading version number in the name (3.5 -> 35, 4 -> 40), so a
-  newer generation outranks an older one within the same tier.
+    an unrecognized model NEVER outranks a known top-tier model, no matter
+    what numbers appear in its name.
 
-With the default scores, `nvidia/nemotron-3.5-lightning-30b-a3b` ranks just
-above `nvidia/nemotron-3-ultra-550b-a55b` (tier tie broken by generation),
-matching the current expectation. When NVIDIA launches something like a
-`nemotron-4-ultra` or `nemotron-4-lightning`, it scores higher and is
-promoted automatically — that is the "new models show up by themselves" rule.
+Sort key (descending on each component):
+
+    1. TIER    — keyword score from the model name:
+                 lightning / ultra / frontier -> 100   (top tier)
+                 pro                          -> 80
+                 super                        -> 70
+                 (unrecognized keyword)       -> 50
+                 air                          -> 35
+                 nano / mini                  -> 25
+    2. VERSION — the leading version number in the name (4 > 3.5 > 3), so a
+                 newer generation outranks an older one within the same tier.
+    3. PARAMS  — total parameter count parsed from the name (550b, 30b...).
+
+Consequences (all covered by tests):
+
+- `nvidia/nemotron-3.5-lightning-30b-a3b` ranks just above
+  `nvidia/nemotron-3-ultra-550b-a55b` (tier tie broken by generation 3.5 > 3).
+- A `nemotron-4-ultra` or `nemotron-4-lightning` launched tomorrow outranks
+  today's 3.5 generation automatically — that is the "new models show up by
+  themselves" rule.
+- A name like `acme-model-999-10000b` stays in the unknown tier (50) and can
+  never jump above any lightning/ultra/frontier/pro/super model, regardless
+  of the 999 or 10000b in its name.
 
 POWER_OVERRIDES (comma-separated env var, e.g.
 POWER_OVERRIDES="moonshotai/kimi-k3,nvidia/nemotron-3.5-lightning-30b-a3b")
@@ -32,7 +42,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from .discovery import CatalogEntry
 
@@ -79,15 +89,31 @@ def _version(name: str) -> float:
     return float(m.group(1)) if m else 0.0
 
 
+def rank_key(model_id: str) -> Tuple[float, float, float]:
+    """Tier-first sort key: (tier, version, params), descending."""
+    return (_tier(model_id), _version(model_id), _params(model_id))
+
+
 def score_model(model_id: str) -> float:
-    return _tier(model_id) + 0.005 * _params(model_id) + 10.0 * _version(model_id)
+    """Convenience single-number score for display purposes.
+
+    NOTE: ranking uses the tier-first tuple (`rank_key`), not this number,
+    so that no amount of version/parameter numerics can overcome a lower
+    tier. Kept for backwards compatibility and logs.
+    """
+    tier, version, params = rank_key(model_id)
+    return tier + 0.005 * params + 0.1 * version
 
 
 def rank_models(
     entries: List[CatalogEntry],
     overrides: Optional[List[str]] = None,
 ) -> List[CatalogEntry]:
-    """Sort entries most-powerful-first. Pinned overrides come first, in order."""
+    """Sort entries most-powerful-first. Pinned overrides come first, in order.
+
+    Tier is compared absolutely first, so a model with an unrecognized
+    (unknown-tier) name can never outrank a known top-tier model.
+    """
     overrides = overrides or []
     if not overrides:
         env = os.environ.get("POWER_OVERRIDES")
@@ -99,7 +125,8 @@ def rank_models(
             pin = overrides.index(e.model)
         except ValueError:
             pin = len(overrides)
-        return (pin, -score_model(e.model))
+        tier, version, params = rank_key(e.model)
+        return (pin, -tier, -version, -params)
 
     return sorted(entries, key=key)
 

@@ -18,6 +18,11 @@ Rate limits:
 Retries: HTTP 429/5xx/timeouts are retried per model with exponential backoff
 (honoring Retry-After), then the chain falls through to the next model.
 Hard errors (401/400) skip retries for that model and fall through directly.
+
+Circuit breaker: after `failure_threshold` consecutive failures (default 3), a
+model is skipped for `recovery_seconds` (default 60 s), then probed again;
+any success fully resets the breaker. Per-model success/failure counters are
+kept in `stats` for observability.
 """
 
 from __future__ import annotations
@@ -38,6 +43,19 @@ ZAI_RPM = 40           # z.ai free models: paced likewise
 
 class RouterError(RuntimeError):
     """All providers in the chain failed."""
+
+
+@dataclass
+class _BreakerState:
+    """Circuit-breaker bookkeeping for one model."""
+
+    consecutive_failures: int = 0
+    opened_at: float = 0.0
+
+    def is_open(self, threshold: int, recovery: float, now: float) -> bool:
+        if self.consecutive_failures < threshold:
+            return False
+        return (now - self.opened_at) < recovery
 
 
 @dataclass
@@ -75,10 +93,34 @@ class ModelRouter:
     max_retries: int = 2                      # retries per model before fallback
     backoff_base: float = 1.5
     max_backoff: float = 30.0
+    failure_threshold: int = 3                 # consecutive failures -> breaker opens
+    recovery_seconds: float = 60.0             # breaker half-open probe interval
     sleep: Callable[[float], None] = time.sleep
     client_factory: Optional[Callable[[ModelSpec], Any]] = None
     catalog: ModelCatalog = field(default_factory=ModelCatalog)
     attempt_log: List[Attempt] = field(default_factory=list)
+    stats: Dict[str, Dict[str, int]] = field(default_factory=dict)   # per-model counters
+    _breaker: Dict[str, _BreakerState] = field(default_factory=dict)
+
+    # ------------------------------------------------------------ breaker
+    def _is_open(self, spec: ModelSpec) -> bool:
+        state = self._breaker.get(spec.label)
+        if state is None:
+            return False
+        return state.is_open(self.failure_threshold, self.recovery_seconds, time.monotonic())
+
+    def _record_success(self, spec: ModelSpec) -> None:
+        self._breaker.pop(spec.label, None)  # a success fully resets the breaker
+        s = self.stats.setdefault(spec.label, {"success": 0, "failure": 0})
+        s["success"] += 1
+
+    def _record_failure(self, spec: ModelSpec) -> None:
+        state = self._breaker.setdefault(spec.label, _BreakerState())
+        state.consecutive_failures += 1
+        if state.consecutive_failures >= self.failure_threshold:
+            state.opened_at = time.monotonic()
+        s = self.stats.setdefault(spec.label, {"success": 0, "failure": 0})
+        s["failure"] += 1
 
     # ------------------------------------------------------------------ chain
     def build_chain(self, force_refresh: bool = False) -> List[ModelSpec]:
@@ -140,6 +182,12 @@ class ModelRouter:
         if not candidates:
             raise RouterError("No models available (check API keys / discovery)")
 
+        # Circuit breaker: prefer healthy models; if everything is open,
+        # still try them all rather than failing outright.
+        healthy = [s for s in candidates if not self._is_open(s)]
+        if healthy:
+            candidates = healthy
+
         buckets: Dict[str, TokenBucket] = {}
         last_error: Optional[str] = None
 
@@ -167,6 +215,7 @@ class ModelRouter:
                     self.attempt_log.append(
                         Attempt(spec, True, elapsed=time.monotonic() - started, retries=retry_no)
                     )
+                    self._record_success(spec)
                     return resp.model_dump() if hasattr(resp, "model_dump") else resp
                 except Exception as exc:  # noqa: BLE001
                     status = getattr(exc, "status_code", None)
@@ -184,6 +233,7 @@ class ModelRouter:
                             Attempt(spec, False, status=status, error=msg, retries=retry_no,
                                     elapsed=time.monotonic() - started)
                         )
+                        self._record_failure(spec)
                         last_error = f"{spec.label} [{status}]: {msg}"
                         break
 
@@ -193,6 +243,7 @@ class ModelRouter:
                             Attempt(spec, False, status=status, error=msg, retries=retry_no - 1,
                                     elapsed=time.monotonic() - started)
                         )
+                        self._record_failure(spec)
                         last_error = f"{spec.label} [{status}] after {retry_no - 1} retries: {msg}"
                         break
 

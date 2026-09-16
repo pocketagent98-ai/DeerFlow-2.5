@@ -4,7 +4,7 @@
 > Copyright (c) 2025 Bytedance Ltd. and/or its affiliates,
 > Copyright (c) 2025-2026 DeerFlow Authors — original LICENSE preserved).
 > This fork keeps DeerFlow exactly as it is, and adds a live, self-updating
-> multi-provider LLM brain on top of it.
+> multi-provider LLM brain on top of it — wired INTO DeerFlow itself.
 
 ## What this adds
 
@@ -13,10 +13,11 @@
 | **Live model discovery** | `providers/discovery.py` | Fetches the FULL, live model list from NVIDIA NIM (`/v1/models`) with your key — nothing hardcoded. Any model NVIDIA launches shows up automatically on the next refresh (TTL 10 min, or forced). z.ai side uses its three fully-free API models: `glm-4.7-flash`, `glm-4.5-flash`, `glm-4.6v-flash`. |
 | **Power ranking with auto-upgrade** | `providers/ranker.py` | Ranks every discovered model by a transparent, editable score (`TIER + 0.005×PARAMS + 10×VERSION`; lightning/ultra/frontier are top tier). Today `nvidia/nemotron-3.5-lightning-30b-a3b` ranks #1. The day NVIDIA launches a bigger/newer top-tier model (e.g. a `nemotron-4-*`), it scores higher and is promoted automatically — no code change, no config change. |
 | **Rate-limit aware router** | `providers/model_router.py` | Chain = top NVIDIA models first, then z.ai free models. NVIDIA NIM paced at **40 requests/minute** (account-wide shared bucket); z.ai likewise — combined roughly one request per ~0.75–1.5 s. On 429/5xx: exponential-backoff retries honoring `Retry-After`, then automatic fallback to the next model. Hard errors (401/400) fall through immediately. |
-| **DeerFlow config sync** | `providers/sync.py` | `python -m providers.sync --write config.yaml` regenerates DeerFlow's `models:` section from the LIVE catalogs, so new models also appear inside DeerFlow's own UI/model picker. |
+| **Deep DeerFlow integration** | `backend/.../config/auto_providers.py` + `config/__init__.py` | `deerflow.config.get_app_config()` is wrapped: with the env keys set, discovered models are appended to DeerFlow's model list on every config load — they simply appear in the model picker. User-configured models keep priority; `DEERFLOW_AUTO_PROVIDERS=0` disables the bridge. |
+| **DeerFlow config sync** | `providers/sync.py` | `python -m providers.sync --write config.yaml` regenerates DeerFlow's `models:` section from the LIVE catalogs, for those who prefer explicit config. |
 | **Game Factory skill** | `skills/public/game-factory/SKILL.md` | The research-to-plan methodology: understand the game → objective-driven research mission (20/45/60-min budget with completion criteria, not just a timer) → source verification → game architecture → Game Bible → Atomic Task DAG (every task carries ID, dependencies, allowed/do-not-touch files, acceptance criteria) → mandatory user approval gate. |
 | **Free stack guide** | `docs/FREE_STACK.md` | Zero-cost replacements for every paid tool: SearXNG/DuckDuckGo (Tavily/Exa/Parallel Search), Crawl4AI (Firecrawl), Semantic Scholar/OpenAlex/arXiv (Consensus), Qdrant for Game Bible memory. |
-| **Tests (no keys needed)** | `providers/tests/` | 16 tests: discovery, auto-promotion of newly launched models, retry, fallback, Retry-After, provider rate buckets. |
+| **Tests (no keys needed)** | `providers/tests/` | 21 tests: discovery, auto-promotion of newly launched models, retry, fallback, Retry-After, provider rate buckets, and the real `deerflow.config.get_app_config()` pipeline. |
 
 ## Setup
 
@@ -50,14 +51,15 @@ EOF
 The chain is rebuilt from the live catalog on every call (TTL-cached), so a
 model NVIDIA launched an hour ago is already in it.
 
-### 3. Inside DeerFlow
+### 3. Inside DeerFlow (automatic)
 
-Keep using DeerFlow exactly as upstream documents (README.md). Whenever you
-want the newest models in DeerFlow's config:
-
-```bash
-python -m providers.sync --write config.yaml
-```
+The bridge is wired into `deerflow.config.get_app_config` (see
+`backend/packages/harness/deerflow/config/auto_providers.py`). With the env
+keys set, discovered models are appended to DeerFlow's model list on every
+config load — they simply appear in the model picker. User-configured models
+always keep priority; `DEERFLOW_AUTO_PROVIDERS=0` disables the bridge.
+`python -m providers.sync --write config.yaml` remains available if you
+prefer the models written into the config file explicitly.
 
 ### 4. Tests
 
@@ -90,6 +92,7 @@ python -m pytest providers/tests -v
 
 MIT. Original DeerFlow code: Copyright (c) 2025 Bytedance Ltd. and/or its
 affiliates, Copyright (c) 2025-2026 DeerFlow Authors (see `LICENSE`).
-This fork's additions (`providers/`, the game-factory skill, docs) are MIT
-as well. The license file and all upstream credits are preserved exactly as
-required — that is what makes this fork safe to use, share and build on.
+This fork's additions (`providers/`, the auto-providers bridge, the
+game-factory skill, docs) are MIT as well. The license file and all upstream
+credits are preserved exactly as required — that is what makes this fork safe
+to use, share and build on.

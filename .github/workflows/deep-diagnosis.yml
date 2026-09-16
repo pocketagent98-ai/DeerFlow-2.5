@@ -1,0 +1,22 @@
+name: Deep key diagnosis
+
+# Manual trigger ONLY. Explains WHY a key is rejected: live NVIDIA catalog
+# + generations, z.ai models/chat status, and the bigmodel.cn cross-check
+# (a key created on Zhipu BigModel does not work on api.z.ai).
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run deep diagnosis
+        run: python diagnose_deep.py
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}

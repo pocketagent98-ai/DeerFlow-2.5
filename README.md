@@ -68,6 +68,26 @@ pip install -r providers/requirements.txt pydantic pyyaml python-dotenv sqlalche
 python -m pytest providers/tests -v   # 29 tests
 ```
 
+### Live verification (real API keys)
+
+The offline test suite needs no keys. To also verify the REAL endpoints
+end to end (~6 API calls, well within the 40 req/min free tier):
+
+```bash
+export NVIDIA_API_KEY=nvapi-... ZAI_API_KEY=...
+python verify_live.py
+```
+
+It live-checks: NVIDIA discovery (your whole account catalog), the z.ai
+free-model safety rule, the power-ranked chain, a real NVIDIA generation
+through the router, a real z.ai glm-4.7-flash generation, and a real vision
+generation on glm-4.6v-flash. Keys are never printed, logged or stored.
+
+There is also a manual-only GitHub Actions workflow ("Live verification
+(real API keys)" under Actions) that runs the same script on a hosted
+runner, reading `NVIDIA_API_KEY` / `ZAI_API_KEY` from encrypted repository
+secrets (Settings → Secrets and variables → Actions).
+
 ## How the auto-discovery works, exactly
 
 1. `providers/discovery.py` calls `GET https://integrate.api.nvidia.com/v1/models`

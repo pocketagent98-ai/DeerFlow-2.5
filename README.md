@@ -21,10 +21,11 @@
 |---|---|---|
 | **🧠 Auto-discovering model brain** | `providers/` + `backend/.../config/auto_providers.py` | Set `NVIDIA_API_KEY` and/or `ZAI_API_KEY` in `.env` and **every model available on NVIDIA NIM appears in DeerFlow's model picker automatically** — no config editing, no sync runs. When NVIDIA launches a new, stronger model tomorrow, it shows up on the next config load and — if it outranks today's models — takes the top slot by itself. |
 | **⚡ Rate-limit aware fallback** | `providers/model_router.py` | NVIDIA NIM paced at **40 requests/minute** (account-wide), z.ai likewise. On 429/5xx: exponential backoff honoring `Retry-After`, then automatic fallback down the chain (top NVIDIA models → z.ai free models). Hard errors (401/400) fall through immediately. |
-| **🏆 Transparent power ranking** | `providers/ranker.py` | Every discovered model is scored (`TIER + 0.005×PARAMS + 10×VERSION`): today `nemotron-3.5-lightning` ranks #1; a hypothetical `nemotron-4-ultra` would outrank it automatically. Unknown names never jump the queue — pin them with `POWER_OVERRIDES` if you want them first. |
-| **🎮 Game Factory skill** | `skills/public/game-factory/SKILL.md` | The research-to-plan methodology: objective-driven research missions (20/45/60-min budget with completion criteria — not just a timer), source verification, Game Bible, and an Atomic Task DAG where every task carries dependencies, allowed/do-not-touch files and acceptance criteria, ending at a mandatory user approval gate before any code is written. |
+| **🏆 Tier-first power ranking** | `providers/ranker.py` | Ranking compares TIER absolutely first (lightning/ultra/frontier on top), then generation, then parameters: today `nemotron-3.5-lightning` ranks #1; a hypothetical `nemotron-4-ultra` would outrank it automatically. Unknown names never jump the queue — pin them with `POWER_OVERRIDES` if you want them first. |
+| **🔁 Circuit breaker + self-healing** | `providers/model_router.py` | A model that fails repeatedly (default: 3 consecutive failures) is automatically skipped for a cooldown window (default: 60 s), then probed again — and any success fully resets it. Per-model success/failure stats are kept in `router.stats` for observability. |
+| **🛡️ z.ai paid-model safety** | `providers/discovery.py` | z.ai uses exactly its three fully-free models (`glm-4.7-flash`, `glm-4.5-flash`, `glm-4.6v-flash`) and NOTHING else: if the endpoint lists models but none of the free three, no z.ai model is used — a paid model is never picked by accident. |
 | **🆓 Free stack guide** | `docs/FREE_STACK.md` | Zero-cost replacements for every paid tool: SearXNG/DuckDuckGo (Tavily/Exa/Parallel Search), Crawl4AI (Firecrawl), Semantic Scholar/OpenAlex/arXiv (Consensus), Qdrant for long-term memory. |
-| **✅ 21 tests, no keys needed** | `providers/tests/` | Unit + integration tests: discovery, auto-promotion of newly launched models, retry/fallback, Retry-After, provider rate buckets, and the real `deerflow.config.get_app_config()` pipeline (skips cleanly when backend deps are absent). |
+| **✅ 29 tests, no keys needed** | `providers/tests/` | Unit + integration tests: discovery, auto-promotion of newly launched models, retry/fallback, Retry-After, provider rate buckets, circuit breaker, z.ai paid-model safety, ranking safety (huge numbers in a name never outrank a known top tier), and the real `deerflow.config.get_app_config()` pipeline (skips cleanly when backend deps are absent). |
 
 ## Quick start
 
@@ -35,7 +36,8 @@ cd DeerFlow-2.5
 # 1. your free keys:
 #    NVIDIA NIM (every model, free serverless credits, 40 req/min):
 #      sign up at https://build.nvidia.com -> key starts with nvapi-
-#    z.ai (3 fully-free models: glm-4.7-flash, glm-4.5-flash, glm-4.6v-flash):
+#    z.ai (exactly 3 fully-free models — glm-4.7-flash, glm-4.5-flash,
+#      glm-4.6v-flash — and never any paid z.ai model, by design):
 #      key from https://z.ai
 cp .env.example .env   # fill NVIDIA_API_KEY / ZAI_API_KEY
 
@@ -55,7 +57,7 @@ from providers import ModelRouter
 
 router = ModelRouter()
 print("Live chain (most powerful first):", router.current_chain)
-print(router.ask("Explain the core loop of an endless runner game in 3 bullets."))
+print(router.ask("Explain the difference between retry and fallback in 3 bullets."))
 EOF
 ```
 
@@ -63,7 +65,7 @@ EOF
 
 ```bash
 pip install -r providers/requirements.txt pydantic pyyaml python-dotenv sqlalchemy
-python -m pytest providers/tests -v   # 21 tests
+python -m pytest providers/tests -v   # 29 tests
 ```
 
 ## How the auto-discovery works, exactly
@@ -89,7 +91,7 @@ prefer the models written into your config file explicitly.
   https://github.com/bytedance/deer-flow — MIT, Copyright (c) 2025 Bytedance
   Ltd. and/or its affiliates, Copyright (c) 2025-2026 DeerFlow Authors.
 - **This fork's additions** (`providers/`, the auto-providers bridge, the
-  game-factory skill, the free-stack docs) — MIT, same license file.
+  free-stack docs) — MIT, same license file.
 
 ## License
 

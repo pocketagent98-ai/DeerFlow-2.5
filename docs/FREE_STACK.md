@@ -55,9 +55,9 @@ All three are free, no credit card:
 - **OpenAlex** — free scholarly catalog API with free keys. https://openalex.org
 - **arXiv** — native DeerFlow search option (`SEARCH_API=arxiv`), no cost.
 
-## 5. Memory / Game Bible storage
+## 5. Memory / long-term project memory storage
 
-- **Qdrant** — free, self-hostable vector database for the Game Bible and
+- **Qdrant** — free, self-hostable vector database for the long-term project memory and
   research memory:
 
   ```bash

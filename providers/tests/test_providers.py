@@ -297,5 +297,138 @@ class TestRouterChain(unittest.TestCase):
         self.assertEqual(labels, ["zai:glm-4.5-flash"])
 
 
+class AlwaysFailsClient:
+    def __init__(self, exc):
+        self.exc = exc
+        self.calls = 0
+
+    @property
+    def chat(self):
+        parent = self
+
+        class _Completions:
+            def create(self, **kw):
+                parent.calls += 1
+                raise parent.exc
+
+        return type("Chat", (), {"completions": _Completions()})()
+
+
+class TestZaiSafety(unittest.TestCase):
+    def test_zai_never_falls_back_to_arbitrary_models(self):
+        # Endpoint UP but none of the three known free models are listed:
+        # NOTHING must be used — never arbitrary (possibly paid) models.
+        def factory(base, key):
+            if "z.ai" in base:
+                return FakeModelsClient(["glm-4.6", "some-paid-model", "another-paid-model"])
+            return FakeModelsClient(["nvidia/nemotron-3.5-lightning-30b-a3b"])
+
+        catalog = ModelCatalog(ttl_seconds=0.0, client_factory=factory)
+        with mock.patch.dict(os.environ, {"NVIDIA_API_KEY": "k", "ZAI_API_KEY": "k"}):
+            entries = catalog.discover()
+        zai = [e.model for e in entries if e.provider == "zai"]
+        self.assertEqual(zai, [])
+
+    def test_zai_uses_exactly_the_three_free_models(self):
+        # Endpoint UP and the free models are listed: exactly those three,
+        # even if other (paid) models are also listed.
+        def factory(base, key):
+            if "z.ai" in base:
+                return FakeModelsClient(list(ZAI_FREE_MODELS) + ["glm-4.6-plus", "glm-4.7"])
+            return FakeModelsClient(["nvidia/nemotron-3.5-lightning-30b-a3b"])
+
+        catalog = ModelCatalog(ttl_seconds=0.0, client_factory=factory)
+        with mock.patch.dict(os.environ, {"NVIDIA_API_KEY": "k", "ZAI_API_KEY": "k"}):
+            entries = catalog.discover()
+        zai = sorted(e.model for e in entries if e.provider == "zai")
+        self.assertEqual(zai, sorted(ZAI_FREE_MODELS))
+
+
+class TestRankerSafety(unittest.TestCase):
+    def test_ridiculous_numbers_never_outrank_top_tier(self):
+        # A name full of huge numbers but no tier keyword must stay at the
+        # BOTTOM, below every known top-tier model (tier is compared first).
+        ranked = rank_models([
+            entry("nvidia", "acme-model-999-10000b"),
+            entry("nvidia", "nvidia/nemotron-3-ultra-550b-a55b"),
+            entry("nvidia", "nvidia/nemotron-3.5-lightning-30b-a3b"),
+        ])
+        models = [e.model for e in ranked]
+        self.assertEqual(models[0], "nvidia/nemotron-3.5-lightning-30b-a3b")
+        self.assertEqual(models[-1], "acme-model-999-10000b")
+
+    def test_newer_generation_still_promotes_within_tier(self):
+        # The auto-upgrade rule must survive the tier-first fix.
+        ranked = rank_models([
+            entry("nvidia", "nvidia/nemotron-3.5-lightning-30b-a3b"),
+            entry("nvidia", "nvidia/nemotron-4-ultra-550b-a55b"),
+        ])
+        self.assertEqual(ranked[0].model, "nvidia/nemotron-4-ultra-550b-a55b")
+
+
+class TestCircuitBreaker(unittest.TestCase):
+    def _router(self, nvidia_client, zai_client, **kw):
+        catalog = ModelCatalog(ttl_seconds=0.0)
+        catalog._entries = [
+            entry("nvidia", "nvidia/nemotron-3.5-lightning-30b-a3b"),
+            entry("zai", "glm-4.5-flash"),
+        ]
+        catalog._fetched_at = 1e18  # never stale
+        clients = {
+            "nvidia:nvidia/nemotron-3.5-lightning-30b-a3b": nvidia_client,
+            "zai:glm-4.5-flash": zai_client,
+        }
+        return ModelRouter(
+            catalog=catalog,
+            client_factory=lambda spec: clients[spec.label],
+            sleep=lambda _s: None,
+            **kw,
+        )
+
+    def test_opens_and_skips_failing_model(self):
+        nvidia = AlwaysFailsClient(FakeStatusError(401))
+        zai = FakeChatClient([FakeResponse("zai ok"), FakeResponse("zai ok again")])
+        router = self._router(nvidia, zai, failure_threshold=1, recovery_seconds=3600)
+        with mock.patch.dict(os.environ, {"NVIDIA_API_KEY": "k", "ZAI_API_KEY": "k"}):
+            self.assertEqual(router.ask("hi"), "zai ok")
+            # nvidia has now failed once -> breaker open -> second call skips it
+            self.assertEqual(router.ask("hi"), "zai ok again")
+        self.assertEqual(nvidia.calls, 1)  # never retried after opening
+
+    def test_recovers_after_recovery_window(self):
+        nvidia = AlwaysFailsClient(FakeStatusError(401))
+        zai = FakeChatClient([FakeResponse("zai ok"), FakeResponse("zai ok 2")])
+        # recovery_seconds=0 -> the breaker immediately allows a new probe
+        router = self._router(nvidia, zai, failure_threshold=1, recovery_seconds=0.0)
+        with mock.patch.dict(os.environ, {"NVIDIA_API_KEY": "k", "ZAI_API_KEY": "k"}):
+            router.ask("hi")
+            router.ask("hi again")  # nvidia is probed again (half-open)
+        self.assertEqual(nvidia.calls, 2)
+        self.assertEqual(zai.calls, 2)
+
+    def test_success_resets_the_breaker(self):
+        nvidia = FakeChatClient([FakeStatusError(401), FakeResponse("n ok"), FakeResponse("n ok 2")])
+        zai = FakeChatClient([FakeResponse("z ok")])
+        # threshold 2: one hard failure is recorded but does NOT open the breaker
+        router = self._router(nvidia, zai, failure_threshold=2, recovery_seconds=3600)
+        with mock.patch.dict(os.environ, {"NVIDIA_API_KEY": "k", "ZAI_API_KEY": "k"}):
+            self.assertEqual(router.ask("hi"), "z ok")    # nvidia hard-failed once
+            self.assertEqual(router.ask("hi"), "n ok")     # success -> breaker reset
+            self.assertEqual(router.ask("hi"), "n ok 2")   # still in chain, not open
+        self.assertEqual(router.stats["nvidia:nvidia/nemotron-3.5-lightning-30b-a3b"]["failure"], 1)
+        self.assertEqual(router.stats["nvidia:nvidia/nemotron-3.5-lightning-30b-a3b"]["success"], 2)
+        self.assertNotIn("nvidia:nvidia/nemotron-3.5-lightning-30b-a3b", router._breaker)
+
+    def test_stats_recorded_for_all_models(self):
+        nvidia = FakeChatClient([FakeStatusError(429), FakeResponse("n"), FakeResponse("n2")])
+        zai = FakeChatClient([FakeResponse("z")])
+        router = self._router(nvidia, zai)
+        with mock.patch.dict(os.environ, {"NVIDIA_API_KEY": "k", "ZAI_API_KEY": "k"}):
+            router.ask("1")   # 429 then success on nvidia (after retry)
+        self.assertEqual(router.stats["nvidia:nvidia/nemotron-3.5-lightning-30b-a3b"]["success"], 1)
+        # zai was never attempted, so it has no stats entry yet
+        self.assertNotIn("zai:glm-4.5-flash", router.stats)
+
+
 if __name__ == "__main__":
     unittest.main()

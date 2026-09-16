@@ -315,9 +315,11 @@ class AlwaysFailsClient:
 
 
 class TestZaiSafety(unittest.TestCase):
-    def test_zai_never_falls_back_to_arbitrary_models(self):
-        # Endpoint UP but none of the three known free models are listed:
-        # NOTHING must be used — never arbitrary (possibly paid) models.
+    def test_listing_never_adds_arbitrary_or_paid_models(self):
+        # Endpoint UP but none of the three free models are listed: the
+        # documented free set stays (chat is the source of truth — live
+        # evidence 2026-09-16) and NO arbitrary/paid model from the
+        # listing is ever picked.
         def factory(base, key):
             if "z.ai" in base:
                 return FakeModelsClient(["glm-4.6", "some-paid-model", "another-paid-model"])
@@ -326,8 +328,8 @@ class TestZaiSafety(unittest.TestCase):
         catalog = ModelCatalog(ttl_seconds=0.0, client_factory=factory)
         with mock.patch.dict(os.environ, {"NVIDIA_API_KEY": "k", "ZAI_API_KEY": "k"}):
             entries = catalog.discover()
-        zai = [e.model for e in entries if e.provider == "zai"]
-        self.assertEqual(zai, [])
+        zai = sorted(e.model for e in entries if e.provider == "zai")
+        self.assertEqual(zai, sorted(ZAI_FREE_MODELS))
 
     def test_zai_uses_exactly_the_three_free_models(self):
         # Endpoint UP and the free models are listed: exactly those three,

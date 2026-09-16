@@ -8,9 +8,11 @@ on the NVIDIA side; the catalog is fetched live.
 z.ai does not reliably expose a public models-list endpoint, and only three
 of its models are fully free on the API (input, output and cached input all
 $0): glm-4.7-flash, glm-4.5-flash (text) and glm-4.6v-flash (vision-capable).
-Those three are used as the configured free set; if z.ai's models endpoint
-works with your key, it is used to confirm availability, otherwise the static
-free set is kept.
+Those three are ALWAYS the z.ai side of the catalog. The models listing
+(when reachable) is informational only: it never adds, and never removes,
+models — live evidence (2026-09-16): a valid key can generate with
+glm-4.7-flash while /v1/models does not list it at all. If a free model ever
+stops working, the router's hard-error path skips it automatically.
 """
 
 from __future__ import annotations
@@ -80,6 +82,7 @@ class ModelCatalog:
         self._fetched_at: float = 0.0
         self.nvidia_error: Optional[str] = None
         self.zai_error: Optional[str] = None
+        self.zai_confirmed: List[str] = []  # free models seen in the live listing (informational)
 
     @property
     def entries(self) -> List[CatalogEntry]:
@@ -100,14 +103,20 @@ class ModelCatalog:
     def _zai_entries(self, api_key: str) -> List[CatalogEntry]:
         listed = fetch_zai_models(api_key, self.client_factory)
         # SAFETY RULE: only the three documented free models are ever used.
-        # - Endpoint unavailable        -> trust the documented free set.
-        # - Endpoint up, free models   -> use exactly those.
-        # - Endpoint up, none free      -> use NOTHING. Never fall back to
-        #   arbitrary (possibly paid) models just because they are listed.
+        # Arbitrary listed models (which may be PAID) are never picked.
+        #
+        # The listing is INFORMATIONAL ONLY — it does not add or remove
+        # models. Live evidence (2026-09-16): a valid key can generate with
+        # glm-4.7-flash while /v1/models does not list it, so trusting the
+        # listing would silently delete the whole free fallback layer. If a
+        # documented free model ever stops working, the router skips it via
+        # its hard-error path.
         if listed:
-            keep = [m for m in ZAI_FREE_MODELS if m in listed]
-        else:
-            keep = list(ZAI_FREE_MODELS)
+            confirmed = sorted(set(ZAI_FREE_MODELS) & set(listed))
+            self.zai_error = None  # listing reachable; informational only
+            if confirmed:
+                self.zai_confirmed = confirmed
+        keep = list(ZAI_FREE_MODELS)
         return [
             CatalogEntry(provider="zai", model=mid, api_base=ZAI_BASE_URL,
                           api_key_env="ZAI_API_KEY")

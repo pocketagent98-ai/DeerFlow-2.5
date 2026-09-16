@@ -1,0 +1,23 @@
+name: Live verification (real API keys)
+
+# Manual trigger ONLY — never runs on push or PR. Keys come from encrypted
+# repository secrets (Settings -> Secrets and variables -> Actions).
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r providers/requirements.txt python-dotenv
+      - name: Run live verification
+        run: python verify_live.py
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
